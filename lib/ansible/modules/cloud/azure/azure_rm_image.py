@@ -15,6 +15,7 @@
 # along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
 
 from __future__ import absolute_import, division, print_function
+
 __metaclass__ = type
 
 DOCUMENTATION = '''
@@ -30,22 +31,10 @@ options:
     description:
       - "The resource group name to use or create to host the deployed template"
     required: true
-  subscription_id:
+  name:
     description:
-      - "The Azure subscription to deploy the template into."
-    required: true
-  tenant_id:
-    description:
-      - "The Azure Active Directory tenant ID of the subscription."
-    required: true
-  client_id:
-    description:
-      - "The Azure Active Directory tenant ID of the subscription."
-    required: true
-  image_name:
-    description:
-      - "The name of the image being created or deleted. Required when state=present or state=absent"
-    required: false
+      - "The name of the image being created."
+    required: True
   vm_name:
     description:
       - "The name of the VM within the resource group to capture. Required when state=present."
@@ -59,13 +48,13 @@ options:
     description:
       - "The desired state of the image"
     default: present
-    choices: present, absent, list
+    choices: present, absent
     required: false
   tags:
     description:
         - Tags to assign to the image.
     required: false
-    
+
 short_description: "Capture Azure Virtual Machine Images"
 version_added: "2.9"
 
@@ -80,32 +69,23 @@ EXAMPLES = '''
     - name: Capture image
       azure_rm_image:
         subscription_id: "{{ subscription_id }}"
-        resource_group: "{{ resource_group_name }}"
+        resource_group_name: "{{ resource_group_name }}"
         client_id: "{{ secrets.client_id }}"
         tenant_id: "{{ tenant_id }}"
         client_secret: "{{ secrets.client_secret }}"
-        vm_name: "Windows2016"
-        image_name: "Win2016-image"
+        vm_name: "{{ vm_name }}"
+        name: "{{ vm-name }}-image"
+        location: "{{ location }}"
         state: present
 
-    - name: List images
-      azure_rm_image:
-        subscription_id: "{{ subscription_id }}"
-        resource_group: "{{ resource_group_name }}"
-        client_id: "{{ secrets.client_id }}"
-        tenant_id: "{{ tenant_id }}"
-        client_secret: "{{ secrets.client_secret }}"
-        location: "{{ location }}"
-        state: list
-        
     - name: Delete image
       azure_rm_image:
         subscription_id: "{{ subscription_id }}"
-        resource_group: "{{ resource_group_name }}"
+        resource_group_name: "{{ resource_group_name }}"
         client_id: "{{ secrets.client_id }}"
         tenant_id: "{{ tenant_id }}"
         client_secret: "{{ secrets.client_secret }}"
-        image_name: "{{ vm-name }}-image"
+        name: "{{ vm-name }}-image"
         location: "{{ location }}"
         state: absent
 '''
@@ -116,9 +96,10 @@ try:
     from msrestazure.azure_exceptions import CloudError
     from azure.mgmt.compute.models import Image
     from azure.mgmt.compute.models import SubResource
-#    from azure.mgmt.compute.models import VirtualMachineCaptureParameters
+# from azure.mgmt.compute.models import VirtualMachineCaptureParameters
 except:
     pass
+
 
 class AzureRMImage(AzureRMModuleBase):
     def __init__(self):
@@ -132,9 +113,9 @@ class AzureRMImage(AzureRMModuleBase):
                 type='str',
                 required=False
             ),
-            image_name=dict(
+            name=dict(
                 type='str',
-                required=False
+                required=True
             ),
             location=dict(
                 type='str',
@@ -144,25 +125,23 @@ class AzureRMImage(AzureRMModuleBase):
                 type='str',
                 required=False,
                 default='present',
-                choices=['present', 'absent', 'list']
+                choices=['present', 'absent']
             )
         )
 
         required_if = [
-            ('state', 'present', ['vm_name', 'image_name']),
-            ('state', 'absent', ['image_name'])
+            ('state', 'present', ['vm_name'])
         ]
 
         self.resource_group = None
         self.vm_name = None
-        self.image_name = None
+        self.name = None
         self.state = None
         self.location = None
 
         self.results = dict(
             changed=False,
-            actions=[],
-            ansible_facts=dict(azure_image=None)
+            ansible_facts=dict(azure_images=None)
         )
 
         super(AzureRMImage, self).__init__(
@@ -186,59 +165,12 @@ class AzureRMImage(AzureRMModuleBase):
             self.results = self.capture_image()
         elif self.state == 'absent':
             self.results = self.delete_image()
-        elif self.state == 'list':
-            self.results['images'] = self.list_images()
         return self.results
 
-    def capture_image(self):
-
-        try:
-            vms = self.compute_client.virtual_machines
-            vms.get(resource_group_name=self.resource_group, vm_name=self.vm_name)
-        except CloudError:
-            self.fail("VM {} not found!".format(self.vm_name))
-        except Exception as e:
-            self.fail("An exception occurred: {}".format(str(e)))
-
-        image_names = self.list_images()
-
-        found = any(elem['name'] == self.image_name for elem in image_names)
-
-        if not found:
-
-            images = self.compute_client.images
-            source_vm = vms.get(resource_group_name=self.resource_group, vm_name=self.vm_name).id
-            params = Image(location=self.location, source_virtual_machine=SubResource(source_vm))
-            if self.check_mode:
-                return_data = dict(name=self.image_name,
-                                   status="Succeeded",
-                                   location=self.location,
-                                   resource_group=self.resource_group,
-                                   changed=True)
-            else:
-                vms.deallocate(self.resource_group, self.vm_name).wait()
-                vms.generalize(self.resource_group, self.vm_name)
-                operation = images.create_or_update(resource_group_name=self.resource_group,
-                                                    image_name=self.image_name, parameters=params)
-                operation.wait()
-                result = operation.result()
-
-                return_data = dict(name=result.name,
-                                   status=result.provisioning_state,
-                                   location=result.location,
-                                   resource_group=self.resource_group,
-                                   changed=True)
-        else:
-            return_data = dict(name=self.image_name,
-                               status="Image already exists",
-                               changed=False)
-
-        return return_data
-
-    def list_images(self):
+    def _list_images(self):
         try:
             images = self.compute_client.images
-            image_list = images.list()  # (resource_group_name=self.resource_group, image_name=self.image_name)
+            image_list = images.list()  # (resource_group_name=self.resource_group, name=self.name)
         except CloudError:
             self.fail("No images found!")
         except Exception as e:
@@ -256,13 +188,58 @@ class AzureRMImage(AzureRMModuleBase):
 
         return named_images
 
+    def capture_image(self):
+
+        try:
+            vms = self.compute_client.virtual_machines
+            vms.get(resource_group_name=self.resource_group, vm_name=self.vm_name)
+        except CloudError:
+            self.fail("VM {} not found!".format(self.vm_name))
+        except Exception as e:
+            self.fail("An exception occurred: {}".format(str(e)))
+
+        image_names = self._list_images()
+
+        found = any(elem['name'] == self.name for elem in image_names)
+
+        if not found:
+
+            images = self.compute_client.images
+            source_vm = vms.get(resource_group_name=self.resource_group, vm_name=self.vm_name).id
+            params = Image(location=self.location, source_virtual_machine=SubResource(source_vm))
+            if self.check_mode:
+                return_data = dict(name=self.name,
+                                   status="Succeeded",
+                                   location=self.location,
+                                   resource_group=self.resource_group,
+                                   changed=True)
+            else:
+                vms.deallocate(self.resource_group, self.vm_name).wait()
+                vms.generalize(self.resource_group, self.vm_name)
+                operation = images.create_or_update(resource_group_name=self.resource_group,
+                                                    image_name=self.name, parameters=params)
+                operation.wait()
+                result = operation.result()
+
+                return_data = dict(name=result.name,
+                                   status=result.provisioning_state,
+                                   location=result.location,
+                                   resource_group=self.resource_group,
+                                   changed=True)
+        else:
+            return_data = dict(name=self.name,
+                               status="Image already exists",
+                               changed=False)
+
+        return return_data
+
     def delete_image(self):
 
         changed = False
         status = "Not found"
-        image_names = self.list_images()
+        image_names = self._list_images()
 
-        found = any(elem['name'] == self.image_name for elem in image_names)
+        found = any(elem['name'] == self.name for elem in image_names)
 
         if found:
             if self.check_mode:
@@ -270,7 +247,7 @@ class AzureRMImage(AzureRMModuleBase):
                 changed = "True"
             else:
                 images = self.compute_client.images
-                operation = images.delete(resource_group_name=self.resource_group, image_name=self.image_name)
+                operation = images.delete(resource_group_name=self.resource_group, name=self.name)
 
                 operation.wait()
                 result = operation.result()
